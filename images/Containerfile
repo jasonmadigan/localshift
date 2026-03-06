@@ -1,0 +1,54 @@
+# stage 1: pre-built RPMs from upstream make rpm
+FROM localhost/microshift-okd-rpm:latest AS builder
+
+# stage 2: our image on regular centos (not bootc)
+FROM quay.io/centos/centos:stream9
+
+ARG REPO_CONFIG_SCRIPT=/tmp/create_repos.sh
+ARG USHIFT_RPM_REPO_PATH=/tmp/rpm-repo
+ARG BUILDER_RPM_REPO_PATH=/home/microshift/microshift/_output/rpmbuild/RPMS
+ARG BUILDER_REPO_SCRIPT=/home/microshift/microshift/src/rpm/create_repos.sh
+ARG BUILDER_POSTINSTALL_SCRIPT=/home/microshift/microshift/src/rpm/postinstall.sh
+ARG BUILDER_EMBED_SCRIPT=/home/microshift/microshift/src/image/embed_images.sh
+
+ENV WITH_KINDNET=${WITH_KINDNET:-1}
+ENV WITH_OLM=${WITH_OLM:-0}
+ENV EMBED_CONTAINER_IMAGES=${EMBED_CONTAINER_IMAGES:-0}
+
+# install RPMs from builder
+COPY --chmod=755 --from=builder ${BUILDER_REPO_SCRIPT} ${REPO_CONFIG_SCRIPT}
+COPY --from=builder ${BUILDER_RPM_REPO_PATH} ${USHIFT_RPM_REPO_PATH}
+RUN ${REPO_CONFIG_SCRIPT} -create ${USHIFT_RPM_REPO_PATH} && \
+    dnf install -y microshift microshift-release-info && \
+    if [ "${WITH_KINDNET}" = "1" ] ; then \
+        dnf install -y microshift-kindnet microshift-kindnet-release-info ; \
+    fi && \
+    if [ "${WITH_OLM}" = "1" ] ; then \
+        dnf install -y microshift-olm microshift-olm-release-info ; \
+    fi && \
+    ${REPO_CONFIG_SCRIPT} -delete && \
+    rm -vf ${REPO_CONFIG_SCRIPT} && \
+    rm -rvf ${USHIFT_RPM_REPO_PATH} && \
+    dnf clean all
+
+# post-install configuration
+COPY --chmod=755 --from=builder ${BUILDER_POSTINSTALL_SCRIPT} /tmp/postinstall.sh
+RUN /tmp/postinstall.sh && rm -f /tmp/postinstall.sh
+
+# embed container images for offline use
+COPY --chmod=755 --from=builder ${BUILDER_EMBED_SCRIPT} /tmp/embed_images.sh
+RUN if [ "${EMBED_CONTAINER_IMAGES}" = "1" ] ; then \
+        echo "root:100000:65536" > /etc/subuid && \
+        echo "root:100000:65536" > /etc/subgid && \
+        /tmp/embed_images.sh && rm -f /tmp/embed_images.sh && \
+        rm -f /etc/subuid /etc/subgid ; \
+    fi
+
+# localshift: storage config with host-container overlay
+COPY storage.conf /etc/containers/storage.conf
+
+# localshift: DNS base domain
+COPY 00-dns.yaml /etc/microshift/config.d/00-dns.yaml
+
+STOPSIGNAL SIGRTMIN+3
+CMD ["/sbin/init"]
