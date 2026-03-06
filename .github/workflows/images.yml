@@ -1,0 +1,98 @@
+name: Build images
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "OCP version to build (blank = all)"
+        type: string
+        default: ""
+
+concurrency:
+  group: images-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  IMAGE_NAME: ghcr.io/${{ github.repository }}
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - version: "4.20"
+            okd_version: "4.20.0-okd-scos.16"
+            release_tag: "4.20.0_g153ff0ca9_4.20.0_okd_scos.16"
+            arch: amd64
+            rpm_arch: x86_64
+          - version: "4.20"
+            okd_version: "4.20.0-okd-scos.16"
+            release_tag: "4.20.0_g153ff0ca9_4.20.0_okd_scos.16"
+            arch: arm64
+            rpm_arch: aarch64
+          - version: "4.21"
+            okd_version: "4.21.0-okd-scos.ec.15"
+            release_tag: "4.21.0_g29f429c21_4.21.0_okd_scos.ec.15"
+            arch: amd64
+            rpm_arch: x86_64
+          - version: "4.21"
+            okd_version: "4.21.0-okd-scos.ec.15"
+            release_tag: "4.21.0_g29f429c21_4.21.0_okd_scos.ec.15"
+            arch: arm64
+            rpm_arch: aarch64
+
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Check version filter
+        if: github.event.inputs.version != '' && github.event.inputs.version != matrix.version
+        run: echo "SKIP=true" >> "$GITHUB_ENV"
+
+      - name: Checkout
+        if: env.SKIP != 'true'
+        uses: actions/checkout@v4
+
+      - name: Download pre-built RPMs
+        if: env.SKIP != 'true'
+        run: |
+          gh release download "${{ matrix.release_tag }}" \
+            -R microshift-io/microshift \
+            -p "microshift-rpms-${{ matrix.rpm_arch }}.tgz" \
+            -D images/
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Install podman
+        if: env.SKIP != 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y podman
+
+      - name: Build image
+        if: env.SKIP != 'true'
+        run: |
+          sudo podman build \
+            --build-arg RPM_TARBALL="microshift-rpms-${{ matrix.rpm_arch }}.tgz" \
+            --build-arg OCP_VERSION="${{ matrix.version }}" \
+            --build-arg WITH_OLM=1 \
+            -t "${{ env.IMAGE_NAME }}:${{ matrix.okd_version }}-${{ matrix.arch }}" \
+            -f images/Containerfile images/
+        timeout-minutes: 15
+
+      - name: Login to GHCR
+        if: env.SKIP != 'true'
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | sudo podman login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Push image
+        if: env.SKIP != 'true'
+        run: |
+          for attempt in 1 2 3; do
+            sudo podman push "${{ env.IMAGE_NAME }}:${{ matrix.okd_version }}-${{ matrix.arch }}" && break
+            echo "push attempt ${attempt} failed, retrying in 10s..."
+            sleep 10
+          done

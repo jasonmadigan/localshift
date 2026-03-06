@@ -1,0 +1,60 @@
+# microshift AIO from pre-built RPMs (microshift-io/microshift releases)
+FROM quay.io/centos/centos:stream9
+
+ARG RPM_TARBALL
+ARG OCP_VERSION
+ARG WITH_OLM=1
+
+COPY ${RPM_TARBALL} /tmp/rpms.tgz
+
+# install microshift from local RPM repo + openshift deps mirror
+RUN dnf install -y createrepo_c && \
+    mkdir -p /tmp/rpms && \
+    tar xzf /tmp/rpms.tgz -C /tmp/rpms --strip-components=1 && \
+    createrepo_c /tmp/rpms && \
+    printf '[microshift-local]\nname=MicroShift Local\nbaseurl=file:///tmp/rpms\nenabled=1\ngpgcheck=0\n' \
+      > /etc/yum.repos.d/microshift-local.repo && \
+    printf '[openshift-deps]\nname=OpenShift Dependencies\nbaseurl=https://mirror.openshift.com/pub/openshift-v4/%s/dependencies/rpms/%s-el9-beta/\nenabled=1\ngpgcheck=0\n' \
+      "$(uname -m)" "${OCP_VERSION}" \
+      > /etc/yum.repos.d/openshift-deps.repo && \
+    dnf install -y microshift microshift-release-info \
+                   microshift-kindnet microshift-kindnet-release-info && \
+    if [ "${WITH_OLM}" = "1" ] ; then \
+        dnf install -y microshift-olm microshift-olm-release-info ; \
+    fi && \
+    dnf remove -y createrepo_c && \
+    rm -rf /tmp/rpms /tmp/rpms.tgz \
+           /etc/yum.repos.d/microshift-local.repo \
+           /etc/yum.repos.d/openshift-deps.repo && \
+    dnf clean all
+
+# post-install: firewall, sysctl, CNI plugins, enable microshift
+RUN dnf install -y firewalld jq bash-completion && \
+    firewall-offline-cmd --zone=trusted --add-source=10.42.0.0/16 && \
+    firewall-offline-cmd --zone=trusted --add-source=169.254.169.1 && \
+    firewall-offline-cmd --zone=public --add-port=6443/tcp && \
+    firewall-offline-cmd --zone=public --add-port=2379/tcp && \
+    firewall-offline-cmd --zone=public --add-port=2380/tcp && \
+    printf 'fs.inotify.max_user_watches = 524288\nfs.inotify.max_user_instances = 16384\n' \
+      > /etc/sysctl.d/99-microshift.conf && \
+    systemctl disable openvswitch 2>/dev/null || true && \
+    systemctl disable systemd-resolved 2>/dev/null || true && \
+    systemctl enable microshift
+
+# CNI plugins (kindnet needs these)
+RUN CNP_VER=v1.8.0 && \
+    ARCH=$(uname -m) && \
+    if [ "$ARCH" = "aarch64" ]; then CNP_ARCH=arm64; else CNP_ARCH=amd64; fi && \
+    curl -sSL --retry 5 -o /tmp/cni.tgz \
+      "https://github.com/containernetworking/plugins/releases/download/${CNP_VER}/cni-plugins-linux-${CNP_ARCH}-${CNP_VER}.tgz" && \
+    mkdir -p /usr/libexec/cni && \
+    tar xzf /tmp/cni.tgz -C /usr/libexec/cni && \
+    rm -f /tmp/cni.tgz
+
+# dns base domain
+RUN mkdir -p /etc/microshift/config.d && \
+    printf 'dns:\n    baseDomain: "127.0.0.1.nip.io"\n' \
+      > /etc/microshift/config.d/00-dns.yaml
+
+STOPSIGNAL SIGRTMIN+3
+CMD ["/sbin/init"]
