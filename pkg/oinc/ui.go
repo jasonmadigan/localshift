@@ -101,6 +101,33 @@ func (s Status) Render() string {
 	return b.String()
 }
 
+// RenderSummary returns a compact boxed summary of endpoints, for post-create output.
+func (s Status) RenderSummary() string {
+	var rows []string
+	label := lipgloss.NewStyle().Foreground(lipgloss.Color("#888888")).Width(12)
+	if s.APIServer != "" {
+		rows = append(rows, fmt.Sprintf("  %s %s", label.Render("API"), s.APIServer))
+	}
+	if s.ConsoleURL != "" {
+		rows = append(rows, fmt.Sprintf("  %s %s", label.Render("Console"), s.ConsoleURL))
+	}
+	if s.IngressHTTP != "" || s.IngressHTTPS != "" {
+		parts := []string{}
+		if s.IngressHTTP != "" {
+			parts = append(parts, s.IngressHTTP)
+		}
+		if s.IngressHTTPS != "" {
+			parts = append(parts, s.IngressHTTPS)
+		}
+		rows = append(rows, fmt.Sprintf("  %s %s", label.Render("Ingress"), strings.Join(parts, tui.Dim.Render(" | "))))
+	}
+	if len(rows) == 0 {
+		return ""
+	}
+	box := tui.Box.Render(strings.Join(rows, "\n"))
+	return indent(box, 2) + "\n"
+}
+
 func indent(s string, n int) string {
 	pad := strings.Repeat(" ", n)
 	lines := strings.Split(s, "\n")

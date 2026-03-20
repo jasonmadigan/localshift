@@ -23,6 +23,8 @@ func Read() ([]byte, error) {
 }
 
 // Update merges the given kubeconfig bytes into the user's kubeconfig file.
+// Cluster, context, and user are all renamed to "oinc" regardless of what
+// MicroShift generates internally.
 func Update(raw []byte) error {
 	existing, err := clientcmd.LoadFromFile(Path())
 	if err != nil {
@@ -34,16 +36,21 @@ func Update(raw []byte) error {
 		return fmt.Errorf("parsing kubeconfig: %w", err)
 	}
 
-	for name, cluster := range incoming.Clusters {
-		existing.Clusters[name] = cluster
+	// take the first cluster/context/user from the incoming config and rename to "oinc"
+	for _, cluster := range incoming.Clusters {
+		existing.Clusters[clusterName] = cluster
+		break
 	}
-	for name, ctx := range incoming.Contexts {
-		existing.Contexts[name] = ctx
+	userName := clusterName + "-admin"
+	for _, auth := range incoming.AuthInfos {
+		existing.AuthInfos[userName] = auth
+		break
 	}
-	for name, auth := range incoming.AuthInfos {
-		existing.AuthInfos[name] = auth
+	existing.Contexts[clusterName] = &api.Context{
+		Cluster:  clusterName,
+		AuthInfo: userName,
 	}
-	existing.CurrentContext = incoming.CurrentContext
+	existing.CurrentContext = clusterName
 
 	return clientcmd.WriteToFile(*existing, Path())
 }

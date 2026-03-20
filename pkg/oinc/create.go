@@ -130,7 +130,11 @@ func Create(ctx context.Context, opts CreateOpts, logger *slog.Logger) error {
 	if !tui.IsTTY() {
 		return createPlain(ctx, opts, logger)
 	}
-	return tui.RunSteps(title, steps)
+	summary := func() string {
+		s := GetStatus(opts.RuntimeOverride)
+		return s.RenderSummary()
+	}
+	return tui.RunSteps(title, steps, tui.WithSummary(summary))
 }
 
 // createPlain is the original slog-based create for non-TTY contexts.

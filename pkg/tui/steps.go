@@ -13,7 +13,6 @@ import (
 )
 
 // Step represents a named unit of work in a multi-step flow.
-// Set Status from within Run to show live sub-status (e.g. "installing...", "waiting for readiness...").
 type Step struct {
 	Name   string
 	Run    func() error
@@ -34,18 +33,20 @@ func (s *Step) getStatus() string {
 	return s.status
 }
 
-// stepDoneMsg signals a step completed (with optional error).
 type stepDoneMsg struct{ err error }
+type summaryMsg struct{ text string }
 
 // StepsModel is a bubbletea model that runs steps sequentially,
 // showing a spinner on the active step and checkmarks on completed ones.
 type StepsModel struct {
-	steps   []*Step
-	current int
-	err     error
-	done    bool
-	spinner spinner.Model
-	title   string
+	steps     []*Step
+	current   int
+	err       error
+	done      bool
+	spinner   spinner.Model
+	title     string
+	summary   string
+	summaryFn func() string
 }
 
 func NewStepsModel(title string, steps []*Step) StepsModel {
@@ -78,9 +79,16 @@ func (m StepsModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.current++
 		if m.current >= len(m.steps) {
 			m.done = true
+			if m.summaryFn != nil {
+				fn := m.summaryFn
+				return m, func() tea.Msg { return summaryMsg{text: fn()} }
+			}
 			return m, tea.Quit
 		}
 		return m, m.runCurrent()
+	case summaryMsg:
+		m.summary = msg.text
+		return m, tea.Quit
 	case spinner.TickMsg:
 		var cmd tea.Cmd
 		m.spinner, cmd = m.spinner.Update(msg)
@@ -118,14 +126,15 @@ func (m StepsModel) View() string {
 	if m.err != nil {
 		b.WriteString(fmt.Sprintf("\n  %s\n", Red.Render(m.err.Error())))
 	}
+	if m.done && m.summary != "" {
+		b.WriteString("\n" + m.summary)
+	}
 	b.WriteString("\n")
 	return b.String()
 }
 
-// Err returns the error from the steps run, if any.
-func (m StepsModel) Err() error {
-	return m.err
-}
+func (m StepsModel) Err() error   { return m.err }
+func (m StepsModel) Done() bool   { return m.done }
 
 func (m StepsModel) runCurrent() tea.Cmd {
 	step := m.steps[m.current]
@@ -134,13 +143,25 @@ func (m StepsModel) runCurrent() tea.Cmd {
 	}
 }
 
+// StepsOpt configures RunSteps behaviour.
+type StepsOpt func(*StepsModel)
+
+// WithSummary provides a function called after all steps succeed.
+// Its return value is rendered below the step list.
+func WithSummary(fn func() string) StepsOpt {
+	return func(m *StepsModel) { m.summaryFn = fn }
+}
+
 // RunSteps runs a step-based TUI if stdout is a terminal,
 // otherwise falls back to plain text output.
-func RunSteps(title string, steps []*Step) error {
+func RunSteps(title string, steps []*Step, opts ...StepsOpt) error {
 	if !IsTTY() {
 		return runStepsPlain(title, steps)
 	}
 	m := NewStepsModel(title, steps)
+	for _, opt := range opts {
+		opt(&m)
+	}
 	p := tea.NewProgram(m)
 	final, err := p.Run()
 	if err != nil {

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/jasonmadigan/oinc/pkg/addons"
 	"github.com/jasonmadigan/oinc/pkg/kubeconfig"
 	"github.com/jasonmadigan/oinc/pkg/oinc"
@@ -83,20 +84,49 @@ func main() {
 	createCmd.Flags().StringVar(&flagConsPlugin, "console-plugin", "", "console plugin wiring (name=url)")
 	createCmd.Flags().StringVar(&flagAddons, "addons", "", "comma-separated addons to install")
 
+	var flagForce bool
 	deleteCmd := &cobra.Command{
 		Use:   "delete",
 		Short: "Delete the cluster",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			logger := newLogger(flagLogLevel)
+			if !flagForce && tui.IsTTY() {
+				ok, err := tui.Confirm("delete the oinc cluster?")
+				if err != nil {
+					return err
+				}
+				if !ok {
+					return nil
+				}
+			}
 			return oinc.Delete(flagRuntime, logger)
 		},
 	}
+	deleteCmd.Flags().BoolVarP(&flagForce, "force", "f", false, "skip confirmation")
 
 	statusCmd := &cobra.Command{
 		Use:   "status",
 		Short: "Show cluster status",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			s := oinc.GetStatus(flagRuntime)
+			if flagWatch {
+				return runStatusDashboard()
+			}
+
+			var s oinc.Status
+			if flagOutput != "json" && tui.IsTTY() {
+				m := tui.NewLoadingModel("fetching cluster status", func() oinc.Status {
+					return oinc.GetStatus(flagRuntime)
+				})
+				p := tea.NewProgram(m)
+				final, err := p.Run()
+				if err != nil {
+					return err
+				}
+				s = final.(tui.LoadingModel[oinc.Status]).Result()
+			} else {
+				s = oinc.GetStatus(flagRuntime)
+			}
+
 			if flagOutput == "json" {
 				out, err := json.MarshalIndent(s, "", "  ")
 				if err != nil {
@@ -104,9 +134,6 @@ func main() {
 				}
 				fmt.Println(string(out))
 				return nil
-			}
-			if flagWatch {
-				return runStatusDashboard()
 			}
 			fmt.Print(s.Render())
 			return nil
@@ -262,6 +289,35 @@ func main() {
 
 	root.AddCommand(createCmd, deleteCmd, statusCmd, versionCmd, switchCmd, addonCmd, kubeconfigCmd)
 
+	// suppress usage on RunE errors -- the TUI already shows what went wrong
+	root.SilenceUsage = true
+
+	setStyledHelp(root)
+
+	// give subcommands their own standard help template so they don't inherit root's
+	stdTmpl := `Usage:{{if .Runnable}}
+  {{.UseLine}}{{end}}{{if .HasAvailableSubCommands}}
+  {{.CommandPath}} [command]{{end}}{{if gt (len .Aliases) 0}}
+
+Aliases:
+  {{.NameAndAliases}}{{end}}{{if .HasAvailableSubCommands}}
+
+Available Commands:{{range .Commands}}{{if (or .IsAvailableCommand (eq .Name "help"))}}
+  {{rpad .Name .NamePadding }} {{.Short}}{{end}}{{end}}{{end}}{{if .HasAvailableLocalFlags}}
+
+Flags:
+{{.LocalFlags.FlagUsages | trimTrailingWhitespaces}}{{end}}{{if .HasAvailableInheritedFlags}}
+
+Global Flags:
+{{.InheritedFlags.FlagUsages | trimTrailingWhitespaces}}{{end}}{{if .HasExample}}
+
+Examples:
+{{.Example}}{{end}}
+`
+	for _, cmd := range root.Commands() {
+		cmd.SetHelpTemplate(stdTmpl)
+	}
+
 	if err := root.Execute(); err != nil {
 		os.Exit(1)
 	}
@@ -341,6 +397,25 @@ func runStatusDashboard() error {
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	_, err := p.Run()
 	return err
+}
+
+func setStyledHelp(root *cobra.Command) {
+	heading := lipgloss.NewStyle().Foreground(lipgloss.Color("#ff69b4")).Bold(true)
+	cmdName := lipgloss.NewStyle().Foreground(lipgloss.Color("#22c55e"))
+
+	cobra.AddTemplateFunc("styledHeading", heading.Render)
+	cobra.AddTemplateFunc("styledCmd", cmdName.Render)
+
+	root.SetHelpTemplate(tui.Pig("oinc ~ OKD in a container") + `
+{{ styledHeading "Commands:" }}
+{{- range .Commands }}{{- if (or .IsAvailableCommand (eq .Name "help")) }}
+  {{ styledCmd (rpad .Name .NamePadding) }}  {{ .Short }}
+{{- end }}{{- end }}
+
+{{ styledHeading "Flags:" }}
+{{ .LocalFlags.FlagUsages }}
+Use "oinc [command] --help" for more about a command.
+`)
 }
 
 func indent(s string, n int) string {
