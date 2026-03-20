@@ -42,17 +42,15 @@ func Get(name string) (Addon, bool) {
 
 func All() map[string]Addon { return registry }
 
-// ParseAddonSpec splits "name@version" or "name:key=val,key=val" into name + options.
-// Simple form: "cert-manager@1.16.0" -> name="cert-manager", opts={"version":"1.16.0"}
-func ParseAddonSpec(spec string) (name string, opts map[string]string) {
-	opts = map[string]string{}
+// ParseAddonSpec splits "name@version" into name + options.
+// e.g. "cert-manager@1.16.0" -> "cert-manager", {"version":"1.16.0"}
+func ParseAddonSpec(spec string) (string, map[string]string) {
+	opts := map[string]string{}
 	if i := strings.Index(spec, "@"); i >= 0 {
-		name = spec[:i]
 		opts["version"] = spec[i+1:]
-		return
+		return spec[:i], opts
 	}
-	name = spec
-	return
+	return spec, opts
 }
 
 // Resolve returns addons in dependency order. Errors on unknown names or cycles.

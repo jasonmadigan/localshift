@@ -4,10 +4,6 @@ import (
 	"context"
 	"fmt"
 	"time"
-
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
 const defaultMetalLBVersion = "0.14.9"
@@ -37,52 +33,10 @@ func (m *metalLB) resolveVersion() string {
 func (m *metalLB) Install(ctx context.Context, cfg *Config) error {
 	v := m.resolveVersion()
 	url := fmt.Sprintf("https://raw.githubusercontent.com/metallb/metallb/v%s/config/manifests/metallb-native.yaml", v)
-	if err := applyManifestURL(ctx, cfg, url); err != nil {
-		return err
-	}
-	// metallb pods need privileged SCC on openshift/microshift
-	return grantSCC(ctx, cfg, "privileged", "metallb-system", []string{"controller", "speaker"})
+	return applyManifestURL(ctx, cfg, url)
 }
 
 func (m *metalLB) Ready(ctx context.Context, cfg *Config) error {
 	return waitForDeployment(ctx, cfg, "metallb-system", "controller", 5*time.Minute)
 }
 
-var sccGVR = schema.GroupVersionResource{
-	Group: "security.openshift.io", Version: "v1", Resource: "securitycontextconstraints",
-}
-
-// grantSCC adds service accounts to an existing SCC's users list.
-func grantSCC(ctx context.Context, cfg *Config, sccName, namespace string, serviceAccounts []string) error {
-	scc, err := cfg.DynamicClient.Resource(sccGVR).Get(ctx, sccName, metav1.GetOptions{})
-	if err != nil {
-		return fmt.Errorf("getting SCC %s: %w", sccName, err)
-	}
-
-	users, _, _ := unstructured.NestedStringSlice(scc.Object, "users")
-	existing := map[string]bool{}
-	for _, u := range users {
-		existing[u] = true
-	}
-
-	changed := false
-	for _, sa := range serviceAccounts {
-		fqn := fmt.Sprintf("system:serviceaccount:%s:%s", namespace, sa)
-		if !existing[fqn] {
-			users = append(users, fqn)
-			changed = true
-		}
-	}
-
-	if !changed {
-		return nil
-	}
-
-	if err := unstructured.SetNestedStringSlice(scc.Object, users, "users"); err != nil {
-		return fmt.Errorf("setting SCC users: %w", err)
-	}
-
-	cfg.Logger.Info("granting SCC", "scc", sccName, "serviceAccounts", serviceAccounts)
-	_, err = cfg.DynamicClient.Resource(sccGVR).Update(ctx, scc, metav1.UpdateOptions{})
-	return err
-}

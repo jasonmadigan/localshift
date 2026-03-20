@@ -7,32 +7,30 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"time"
 
-	"github.com/charmbracelet/lipgloss"
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/jasonmadigan/oinc/pkg/addons"
 	"github.com/jasonmadigan/oinc/pkg/kubeconfig"
 	"github.com/jasonmadigan/oinc/pkg/oinc"
 	"github.com/jasonmadigan/oinc/pkg/runtime"
+	"github.com/jasonmadigan/oinc/pkg/tui"
 	"github.com/jasonmadigan/oinc/pkg/version"
 	"github.com/spf13/cobra"
 )
 
 var (
-	green = lipgloss.NewStyle().Foreground(lipgloss.Color("#22c55e"))
-	dim   = lipgloss.NewStyle().Foreground(lipgloss.Color("#888888"))
-)
-
-var (
-	flagRuntime        string
-	flagVersion        string
-	flagHTTPPort       int
-	flagHTTPSPort      int
-	flagConsolePort    int
-	flagConsPlugin     string
-	flagAddons         string
-	flagLogLevel       string
-	flagOutput         string
+	flagRuntime         string
+	flagVersion         string
+	flagHTTPPort        int
+	flagHTTPSPort       int
+	flagConsolePort     int
+	flagConsPlugin      string
+	flagAddons          string
+	flagLogLevel        string
+	flagOutput          string
 	flagKubeconfigPrint bool
+	flagWatch           bool
 )
 
 var buildVersion = "dev"
@@ -56,7 +54,7 @@ func main() {
 	root := &cobra.Command{
 		Use:   "oinc",
 		Short: "OKD in a container",
-		Long:  oinc.Pig("oinc ~ OKD in a container"),
+		Long:  tui.Pig("oinc ~ OKD in a container"),
 	}
 
 	root.PersistentFlags().StringVar(&flagRuntime, "runtime", "", "container runtime (auto-detected if empty)")
@@ -67,7 +65,7 @@ func main() {
 		Short: "Create a cluster",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			logger := newLogger(flagLogLevel)
-			return oinc.Create(oinc.CreateOpts{
+			return oinc.Create(cmd.Context(), oinc.CreateOpts{
 				Version:         flagVersion,
 				RuntimeOverride: flagRuntime,
 				HTTPPort:        flagHTTPPort,
@@ -100,21 +98,28 @@ func main() {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			s := oinc.GetStatus(flagRuntime)
 			if flagOutput == "json" {
-				out, _ := json.MarshalIndent(s, "", "  ")
+				out, err := json.MarshalIndent(s, "", "  ")
+				if err != nil {
+					return fmt.Errorf("marshalling status: %w", err)
+				}
 				fmt.Println(string(out))
 				return nil
+			}
+			if flagWatch {
+				return runStatusDashboard()
 			}
 			fmt.Print(s.Render())
 			return nil
 		},
 	}
 	statusCmd.Flags().StringVarP(&flagOutput, "output", "o", "", "output format (json)")
+	statusCmd.Flags().BoolVarP(&flagWatch, "watch", "w", false, "interactive dashboard with auto-refresh")
 
 	versionCmd := &cobra.Command{
 		Use:   "version",
 		Short: "Show oinc version",
 		Run: func(cmd *cobra.Command, args []string) {
-			fmt.Print(oinc.Pig("oinc " + buildVersion))
+			fmt.Print(tui.Pig("oinc " + buildVersion))
 		},
 	}
 
@@ -123,14 +128,17 @@ func main() {
 		Short: "List available OCP versions",
 		Run: func(cmd *cobra.Command, args []string) {
 			def := version.Default()
+			var rows []string
 			for _, v := range version.All() {
 				marker := ""
 				if v.Version == def.Version {
-					marker = "  " + green.Render("[default]")
+					marker = "  " + tui.Green.Render("[default]")
 				}
-				fmt.Printf("  %-6s %s%s\n",
-					v.Version, dim.Render(fmt.Sprintf("microshift: %s, console: %s", v.MicroShiftTag, v.ConsoleTag)), marker)
+				rows = append(rows, fmt.Sprintf("  %-6s %s%s",
+					v.Version, tui.Dim.Render(fmt.Sprintf("microshift: %s, console: %s", v.MicroShiftTag, v.ConsoleTag)), marker))
 			}
+			box := tui.Box.Render(strings.Join(rows, "\n"))
+			fmt.Println(indent(box, 2))
 		},
 	}
 	versionCmd.AddCommand(versionListCmd)
@@ -145,7 +153,7 @@ func main() {
 			if err := oinc.Delete(flagRuntime, logger); err != nil {
 				logger.Warn("delete failed, continuing", "err", err)
 			}
-			return oinc.Create(oinc.CreateOpts{
+			return oinc.Create(cmd.Context(), oinc.CreateOpts{
 				Version:         args[0],
 				RuntimeOverride: flagRuntime,
 				HTTPPort:        flagHTTPPort,
@@ -175,22 +183,25 @@ func main() {
 				names = append(names, name)
 			}
 			sort.Strings(names)
+			var rows []string
 			for _, name := range names {
 				a := all[name]
 				deps := a.Dependencies()
 				if len(deps) > 0 {
-					fmt.Printf("  %-16s %s\n", name, dim.Render("requires: "+strings.Join(deps, ", ")))
+					rows = append(rows, fmt.Sprintf("  %-16s %s", name, tui.Dim.Render("requires: "+strings.Join(deps, ", "))))
 				} else {
-					fmt.Printf("  %s\n", name)
+					rows = append(rows, fmt.Sprintf("  %s", name))
 				}
 			}
+			box := tui.Box.Render(strings.Join(rows, "\n"))
+			fmt.Println(indent(box, 2))
 		},
 	}
 
 	addonInstallCmd := &cobra.Command{
-		Use:   "install <addon>[,<addon>...]",
+		Use:   "install [addon[,addon...]]",
 		Short: "Install addons into a running cluster",
-		Args:  cobra.ExactArgs(1),
+		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			logger := newLogger(flagLogLevel)
 
@@ -204,7 +215,36 @@ func main() {
 				return fmt.Errorf("reading kubeconfig: %w", err)
 			}
 
-			return oinc.InstallAddons(args[0], kc, rt, logger)
+			addonArg := ""
+			if len(args) > 0 {
+				addonArg = args[0]
+			}
+
+			// no args + TTY: interactive picker
+			if addonArg == "" && tui.IsTTY() {
+				selected, err := runAddonPicker(flagRuntime)
+				if err != nil {
+					return err
+				}
+				if len(selected) == 0 {
+					return nil
+				}
+				addonArg = strings.Join(selected, ",")
+			}
+
+			if addonArg == "" {
+				return fmt.Errorf("specify addons to install, or run interactively in a terminal")
+			}
+
+			if tui.IsTTY() {
+				steps, err := oinc.AddonInstallSteps(cmd.Context(), addonArg, kc, rt, flagRuntime)
+				if err != nil {
+					return err
+				}
+				return tui.RunSteps("installing addons", steps)
+			}
+
+			return oinc.InstallAddons(cmd.Context(), addonArg, kc, rt, logger)
 		},
 	}
 
@@ -225,4 +265,91 @@ func main() {
 	if err := root.Execute(); err != nil {
 		os.Exit(1)
 	}
+}
+
+func runAddonPicker(runtimeOverride string) ([]string, error) {
+	all := addons.All()
+	names := make([]string, 0, len(all))
+	for name := range all {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	// check what's already installed via status
+	s := oinc.GetStatus(runtimeOverride)
+	installed := map[string]bool{}
+	for _, a := range s.Addons {
+		installed[a.Name] = true
+	}
+
+	var items []tui.PickerItem
+	for _, name := range names {
+		a := all[name]
+		hint := ""
+		if deps := a.Dependencies(); len(deps) > 0 {
+			hint = "requires: " + strings.Join(deps, ", ")
+		}
+		items = append(items, tui.PickerItem{
+			Name:      name,
+			Hint:      hint,
+			Installed: installed[name],
+		})
+	}
+
+	m := tui.NewPickerModel("addon install", items)
+	p := tea.NewProgram(m)
+	final, err := p.Run()
+	if err != nil {
+		return nil, err
+	}
+	fm := final.(tui.PickerModel)
+	if fm.Aborted() {
+		return nil, nil
+	}
+	return fm.Selected(), nil
+}
+
+func runStatusDashboard() error {
+	fetch := func() tui.StatusData {
+		s := oinc.GetStatus(flagRuntime)
+		data := tui.StatusData{
+			State:        s.State,
+			Runtime:      s.Runtime,
+			Version:      s.Version,
+			APIServer:    s.APIServer,
+			ConsoleURL:   s.ConsoleURL,
+			IngressHTTP:  s.IngressHTTP,
+			IngressHTTPS: s.IngressHTTPS,
+			Uptime:       s.Uptime,
+			Error:        s.Error,
+		}
+		for _, a := range s.Addons {
+			data.Addons = append(data.Addons, tui.AddonData{Name: a.Name, Ready: a.Ready})
+		}
+		for _, p := range oinc.GetPods() {
+			data.Pods = append(data.Pods, tui.PodData{
+				Name:      p.Name,
+				Namespace: p.Namespace,
+				Ready:     p.Ready,
+				Status:    p.Status,
+			})
+		}
+		return data
+	}
+
+	m := tui.NewStatusModel(fetch, 5*time.Second)
+	p := tea.NewProgram(m, tea.WithAltScreen())
+	_, err := p.Run()
+	return err
+}
+
+func indent(s string, n int) string {
+	pad := strings.Repeat(" ", n)
+	lines := strings.Split(s, "\n")
+	for i := range lines {
+		if lines[i] != "" {
+			lines[i] = pad + lines[i]
+		}
+	}
+	return strings.Join(lines, "\n")
 }

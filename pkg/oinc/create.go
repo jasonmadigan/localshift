@@ -11,6 +11,7 @@ import (
 	"github.com/jasonmadigan/oinc/pkg/cluster"
 	"github.com/jasonmadigan/oinc/pkg/kubeconfig"
 	"github.com/jasonmadigan/oinc/pkg/runtime"
+	"github.com/jasonmadigan/oinc/pkg/tui"
 	"github.com/jasonmadigan/oinc/pkg/version"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
@@ -30,11 +31,110 @@ type CreateOpts struct {
 	HTTPPort        int
 	HTTPSPort       int
 	ConsolePort     int
-	ConsolePlugin   string // "name=url" for plugin wiring
-	Addons          string // comma-separated addon names
+	ConsolePlugin   string
+	Addons          string
 }
 
-func Create(opts CreateOpts, logger *slog.Logger) error {
+// CreateSteps returns the create flow as discrete steps for the TUI.
+func CreateSteps(ctx context.Context, opts CreateOpts) (string, []*tui.Step) {
+	var (
+		ver version.OCPVersion
+		rt  *runtime.Runtime
+		raw []byte
+	)
+
+	steps := []*tui.Step{
+		{Name: "resolving version", Run: func() error {
+			v, err := version.Resolve(opts.Version)
+			if err != nil {
+				return err
+			}
+			ver = v
+			return nil
+		}},
+		{Name: "detecting runtime", Run: func() error {
+			r, err := runtime.Detect(opts.RuntimeOverride)
+			if err != nil {
+				return err
+			}
+			rt = r
+			return nil
+		}},
+		{Name: "pulling image", Run: func() error {
+			return rt.PullImage(ver.MicroShiftImage(), ver.Platform())
+		}},
+		{Name: "creating container", Run: func() error {
+			if rt.ContainerExists(containerName) {
+				return rt.StartContainer(containerName)
+			}
+			copts := runtime.ContainerOpts{
+				Name:       containerName,
+				Image:      ver.MicroShiftImage(),
+				Hostname:   hostname,
+				Privileged: true,
+				Platform:   ver.Platform(),
+				Labels:     map[string]string{labelKey: containerName},
+				Ports: []runtime.PortMapping{
+					{Host: opts.HTTPPort, Container: 80},
+					{Host: opts.HTTPSPort, Container: 443},
+					{Host: 6443, Container: 6443},
+				},
+			}
+			if err := rt.CreateContainer(copts); err != nil {
+				return err
+			}
+			return rt.StartContainer(containerName)
+		}},
+		{Name: "waiting for microshift", Run: func() error {
+			return rt.WaitForService(containerName, "microshift", 120, 5*time.Second)
+		}},
+		{Name: "merging kubeconfig", Run: func() error {
+			kcPath := fmt.Sprintf("%s/%s/kubeconfig", kubeconfigDir, hostname)
+			kc, err := rt.CopyFromContainer(containerName, kcPath)
+			if err != nil {
+				return err
+			}
+			raw = kc
+			return kubeconfig.Update(raw)
+		}},
+		{Name: "waiting for pods", Run: func() error {
+			return cluster.WaitForReady(ctx, raw, 60, 5*time.Second)
+		}},
+		{Name: "setting up console", Run: func() error {
+			logger := slog.New(slog.NewTextHandler(devNull{}, nil))
+			return setupConsole(rt, raw, ver, opts.ConsolePort, opts.ConsolePlugin, logger)
+		}},
+	}
+
+	if opts.Addons != "" {
+		steps = append(steps, &tui.Step{
+			Name: "installing addons",
+			Run: func() error {
+				logger := slog.New(slog.NewTextHandler(devNull{}, nil))
+				return InstallAddons(ctx, opts.Addons, raw, rt, logger)
+			},
+		})
+	}
+
+	title := "creating cluster"
+	if opts.Version != "" {
+		title = fmt.Sprintf("creating cluster (%s)", opts.Version)
+	}
+
+	return title, steps
+}
+
+// Create runs the full create flow. Uses TUI when possible, plain output otherwise.
+func Create(ctx context.Context, opts CreateOpts, logger *slog.Logger) error {
+	title, steps := CreateSteps(ctx, opts)
+	if !tui.IsTTY() {
+		return createPlain(ctx, opts, logger)
+	}
+	return tui.RunSteps(title, steps)
+}
+
+// createPlain is the original slog-based create for non-TTY contexts.
+func createPlain(ctx context.Context, opts CreateOpts, logger *slog.Logger) error {
 	ver, err := version.Resolve(opts.Version)
 	if err != nil {
 		return err
@@ -95,9 +195,10 @@ func Create(opts CreateOpts, logger *slog.Logger) error {
 	if err := kubeconfig.Update(raw); err != nil {
 		return fmt.Errorf("updating kubeconfig: %w", err)
 	}
+	logger.Info("kubeconfig merged", "path", kubeconfig.Path())
 
 	logger.Info("waiting for pods to be ready")
-	if err := cluster.WaitForReady(raw, 60, 5*time.Second); err != nil {
+	if err := cluster.WaitForReady(ctx, raw, 60, 5*time.Second); err != nil {
 		return fmt.Errorf("cluster readiness: %w", err)
 	}
 
@@ -107,7 +208,7 @@ func Create(opts CreateOpts, logger *slog.Logger) error {
 	}
 
 	if opts.Addons != "" {
-		if err := InstallAddons(opts.Addons, raw, rt, logger); err != nil {
+		if err := InstallAddons(ctx, opts.Addons, raw, rt, logger); err != nil {
 			return fmt.Errorf("addon installation: %w", err)
 		}
 	}
@@ -116,7 +217,12 @@ func Create(opts CreateOpts, logger *slog.Logger) error {
 	return nil
 }
 
-func InstallAddons(addonList string, kubeconfig []byte, rt *runtime.Runtime, logger *slog.Logger) error {
+// devNull discards all writes.
+type devNull struct{}
+
+func (devNull) Write(p []byte) (int, error) { return len(p), nil }
+
+func InstallAddons(ctx context.Context, addonList string, kubeconfig []byte, rt *runtime.Runtime, logger *slog.Logger) error {
 	names := strings.Split(addonList, ",")
 	for i := range names {
 		names[i] = strings.TrimSpace(names[i])
@@ -150,7 +256,6 @@ func InstallAddons(addonList string, kubeconfig []byte, rt *runtime.Runtime, log
 		Logger:        logger,
 	}
 
-	ctx := context.Background()
 	for _, a := range sorted {
 		logger.Info("installing addon", "addon", a.Name())
 		if err := a.Install(ctx, cfg); err != nil {
@@ -164,4 +269,71 @@ func InstallAddons(addonList string, kubeconfig []byte, rt *runtime.Runtime, log
 	}
 
 	return nil
+}
+
+// AddonInstallSteps returns the addon install flow as discrete steps for the TUI.
+// Already-installed addons (detected via status) are skipped.
+func AddonInstallSteps(ctx context.Context, addonList string, kc []byte, rt *runtime.Runtime, runtimeOverride string) ([]*tui.Step, error) {
+	names := strings.Split(addonList, ",")
+	for i := range names {
+		names[i] = strings.TrimSpace(names[i])
+	}
+
+	sorted, err := addons.Resolve(names)
+	if err != nil {
+		return nil, err
+	}
+
+	// detect what's already installed so we can skip
+	installed := map[string]bool{}
+	s := GetStatus(runtimeOverride)
+	for _, a := range s.Addons {
+		if a.Ready {
+			installed[a.Name] = true
+		}
+	}
+
+	config, err := clientcmd.RESTConfigFromKubeConfig(kc)
+	if err != nil {
+		return nil, fmt.Errorf("building rest config: %w", err)
+	}
+
+	clientset, err := kubernetes.NewForConfig(config)
+	if err != nil {
+		return nil, fmt.Errorf("creating k8s client: %w", err)
+	}
+
+	dynClient, err := dynamic.NewForConfig(config)
+	if err != nil {
+		return nil, fmt.Errorf("creating dynamic client: %w", err)
+	}
+
+	logger := slog.New(slog.NewTextHandler(devNull{}, nil))
+	cfg := &addons.Config{
+		Kubeconfig:    kc,
+		DynamicClient: dynClient,
+		Clientset:     clientset,
+		Runtime:       rt,
+		Logger:        logger,
+	}
+
+	var steps []*tui.Step
+	for _, a := range sorted {
+		a := a
+		if installed[a.Name()] {
+			continue
+		}
+		step := &tui.Step{Name: a.Name()}
+		step.Run = func() error {
+			step.SetStatus("installing")
+			if err := a.Install(ctx, cfg); err != nil {
+				return fmt.Errorf("installing: %w", err)
+			}
+			step.SetStatus("waiting for readiness")
+			return a.Ready(ctx, cfg)
+		}
+		steps = append(steps, step)
+	}
+
+	return steps, nil
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/jasonmadigan/oinc/pkg/kubeconfig"
@@ -149,6 +150,76 @@ func deploymentReady(ctx context.Context, dyn dynamic.Interface, ns, name string
 	}
 	avail, _, _ := unstructured.NestedInt64(dep.Object, "status", "availableReplicas")
 	return avail > 0
+}
+
+// PodInfo holds summary info for a single pod.
+type PodInfo struct {
+	Name      string `json:"name"`
+	Namespace string `json:"namespace"`
+	Ready     string `json:"ready"`
+	Status    string `json:"status"`
+}
+
+// GetPods returns pods in openshift-* namespaces.
+func GetPods() []PodInfo {
+	kc, err := kubeconfig.Read()
+	if err != nil {
+		return nil
+	}
+	config, err := clientcmd.RESTConfigFromKubeConfig(kc)
+	if err != nil {
+		return nil
+	}
+	config.Timeout = 5 * time.Second
+
+	dyn, err := dynamic.NewForConfig(config)
+	if err != nil {
+		return nil
+	}
+
+	podGVR := schema.GroupVersionResource{Version: "v1", Resource: "pods"}
+	list, err := dyn.Resource(podGVR).Namespace("").List(context.Background(), metav1.ListOptions{})
+	if err != nil {
+		return nil
+	}
+
+	var pods []PodInfo
+	for _, item := range list.Items {
+		ns := item.GetNamespace()
+		if !strings.HasPrefix(ns, "openshift-") && ns != "kube-system" {
+			continue
+		}
+
+		phase, _, _ := unstructured.NestedString(item.Object, "status", "phase")
+
+		// count ready/total containers
+		containers, _, _ := unstructured.NestedSlice(item.Object, "status", "containerStatuses")
+		total := len(containers)
+		readyCount := 0
+		for _, c := range containers {
+			if cs, ok := c.(map[string]any); ok {
+				if r, ok := cs["ready"].(bool); ok && r {
+					readyCount++
+				}
+			}
+		}
+
+		pods = append(pods, PodInfo{
+			Name:      item.GetName(),
+			Namespace: ns,
+			Ready:     fmt.Sprintf("%d/%d", readyCount, total),
+			Status:    phase,
+		})
+	}
+
+	sort.Slice(pods, func(i, j int) bool {
+		if pods[i].Namespace != pods[j].Namespace {
+			return pods[i].Namespace < pods[j].Namespace
+		}
+		return pods[i].Name < pods[j].Name
+	})
+
+	return pods
 }
 
 func formatUptime(d time.Duration) string {

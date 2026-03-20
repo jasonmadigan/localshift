@@ -208,7 +208,7 @@ func createConsoleRBAC(client kubernetes.Interface) error {
 }
 
 func createBearerToken(client kubernetes.Interface) (string, error) {
-	expiry := int64(8760 * 3600) // 1 year
+	expiry := int64(30 * 24 * 3600) // 30 days, regenerated on each create
 	req := &authv1.TokenRequest{
 		Spec: authv1.TokenRequestSpec{
 			ExpirationSeconds: &expiry,

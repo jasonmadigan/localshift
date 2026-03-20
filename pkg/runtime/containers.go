@@ -52,7 +52,7 @@ func (r *Runtime) CreateContainer(opts ContainerOpts) error {
 	}
 
 	if opts.Privileged {
-		args = append(args, "-it", "--privileged")
+		args = append(args, "--privileged")
 	}
 
 	for _, p := range opts.Ports {

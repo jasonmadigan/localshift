@@ -72,11 +72,6 @@ func (r *Runtime) validate() error {
 		return fmt.Errorf("%s requires rootful mode", r.binary)
 	}
 
-	// podman on linux may need sudo
-	if r.binary == "podman" && runtime.GOOS == "linux" {
-		r.sudo = info.rootless
-	}
-
 	return nil
 }
 

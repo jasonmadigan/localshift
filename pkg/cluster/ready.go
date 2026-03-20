@@ -18,7 +18,7 @@ var coreNamespaces = []string{
 	"openshift-service-ca",
 }
 
-func WaitForReady(kubeconfig []byte, retries int, delay time.Duration) error {
+func WaitForReady(ctx context.Context, kubeconfig []byte, retries int, delay time.Duration) error {
 	config, err := clientcmd.RESTConfigFromKubeConfig(kubeconfig)
 	if err != nil {
 		return fmt.Errorf("building rest config: %w", err)
@@ -29,27 +29,14 @@ func WaitForReady(kubeconfig []byte, retries int, delay time.Duration) error {
 		return fmt.Errorf("creating k8s client: %w", err)
 	}
 
-	// wait for node to be ready first
-	for i := range retries {
-		nodes, err := client.CoreV1().Nodes().List(context.TODO(), metav1.ListOptions{})
-		if err == nil && len(nodes.Items) > 0 {
-			for _, cond := range nodes.Items[0].Status.Conditions {
-				if cond.Type == "Ready" && cond.Status == "True" {
-					goto nodeReady
-				}
-			}
-		}
-		if i < retries-1 {
-			time.Sleep(delay)
-		}
+	if err := waitForNode(ctx, client, retries, delay); err != nil {
+		return err
 	}
-	return fmt.Errorf("node not ready after %d attempts", retries)
-nodeReady:
 
 	for i := range retries {
 		allReady := true
 		for _, ns := range coreNamespaces {
-			if err := checkNamespaceReady(client, ns); err != nil {
+			if err := checkNamespaceReady(ctx, client, ns); err != nil {
 				allReady = false
 				break
 			}
@@ -64,8 +51,25 @@ nodeReady:
 	return fmt.Errorf("pods not ready after %d attempts", retries)
 }
 
-func checkNamespaceReady(client kubernetes.Interface, ns string) error {
-	pods, err := client.CoreV1().Pods(ns).List(context.TODO(), metav1.ListOptions{})
+func waitForNode(ctx context.Context, client kubernetes.Interface, retries int, delay time.Duration) error {
+	for i := range retries {
+		nodes, err := client.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
+		if err == nil && len(nodes.Items) > 0 {
+			for _, cond := range nodes.Items[0].Status.Conditions {
+				if cond.Type == "Ready" && cond.Status == "True" {
+					return nil
+				}
+			}
+		}
+		if i < retries-1 {
+			time.Sleep(delay)
+		}
+	}
+	return fmt.Errorf("node not ready after %d attempts", retries)
+}
+
+func checkNamespaceReady(ctx context.Context, client kubernetes.Interface, ns string) error {
+	pods, err := client.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return fmt.Errorf("listing pods in %s: %w", ns, err)
 	}
