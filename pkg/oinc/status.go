@@ -100,6 +100,7 @@ type addonCheck struct {
 
 var addonChecks = []addonCheck{
 	{"cert-manager", "cert-manager", "cert-manager-webhook"},
+	{"ingress-operator", "openshift-ingress-operator", "ingress-operator"},
 	{"metallb", "metallb-system", "controller"},
 	{"istio", "istio-system", "istiod"},
 	{"kuadrant", "kuadrant-system", "kuadrant-operator-controller-manager"},

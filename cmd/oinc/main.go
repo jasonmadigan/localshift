@@ -13,6 +13,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/jasonmadigan/oinc/pkg/addons"
 	"github.com/jasonmadigan/oinc/pkg/kubeconfig"
+	"github.com/jasonmadigan/oinc/pkg/pullsecret"
 	"github.com/jasonmadigan/oinc/pkg/oinc"
 	"github.com/jasonmadigan/oinc/pkg/runtime"
 	"github.com/jasonmadigan/oinc/pkg/tui"
@@ -287,7 +288,45 @@ func main() {
 	}
 	kubeconfigCmd.Flags().BoolVarP(&flagKubeconfigPrint, "print", "p", false, "print raw kubeconfig to stdout")
 
-	root.AddCommand(createCmd, deleteCmd, statusCmd, versionCmd, switchCmd, addonCmd, kubeconfigCmd)
+	pullSecretCmd := &cobra.Command{
+		Use:   "pull-secret",
+		Short: "Manage Red Hat pull secret",
+	}
+	pullSecretSetCmd := &cobra.Command{
+		Use:   "set <path>",
+		Short: "Store a pull secret for authenticated registries",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := pullsecret.Save(args[0]); err != nil {
+				return err
+			}
+			p, _ := pullsecret.Path()
+			fmt.Printf("pull secret saved to %s\n", p)
+			return nil
+		},
+	}
+	pullSecretRemoveCmd := &cobra.Command{
+		Use:   "remove",
+		Short: "Remove the stored pull secret",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return pullsecret.Remove()
+		},
+	}
+	pullSecretStatusCmd := &cobra.Command{
+		Use:   "status",
+		Short: "Check if a pull secret is configured",
+		Run: func(cmd *cobra.Command, args []string) {
+			if pullsecret.Exists() {
+				p, _ := pullsecret.Path()
+				fmt.Printf("pull secret configured: %s\n", p)
+			} else {
+				fmt.Printf("no pull secret configured\nget one from: %s\n", pullsecret.PullSecretURL)
+			}
+		},
+	}
+	pullSecretCmd.AddCommand(pullSecretSetCmd, pullSecretRemoveCmd, pullSecretStatusCmd)
+
+	root.AddCommand(createCmd, deleteCmd, statusCmd, versionCmd, switchCmd, addonCmd, kubeconfigCmd, pullSecretCmd)
 
 	// suppress usage on RunE errors -- the TUI already shows what went wrong
 	root.SilenceUsage = true

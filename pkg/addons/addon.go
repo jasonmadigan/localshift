@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"strings"
 
+	"github.com/jasonmadigan/oinc/pkg/pullsecret"
 	"github.com/jasonmadigan/oinc/pkg/runtime"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
@@ -29,6 +30,12 @@ type Addon interface {
 // Configurable is implemented by addons that accept options (e.g. version).
 type Configurable interface {
 	SetOptions(opts map[string]string)
+}
+
+// PullSecretRequired is implemented by addons that need authenticated image registries.
+type PullSecretRequired interface {
+	NeedsPullSecret() bool
+	PullSecretRegistries() []string
 }
 
 var registry = map[string]Addon{}
@@ -155,6 +162,22 @@ func Resolve(specs []string) ([]Addon, error) {
 
 	if len(sorted) != len(needed) {
 		return nil, fmt.Errorf("dependency cycle detected")
+	}
+
+	// check pull secret requirements
+	for _, a := range sorted {
+		ps, ok := a.(PullSecretRequired)
+		if !ok || !ps.NeedsPullSecret() {
+			continue
+		}
+		if !pullsecret.Exists() {
+			return nil, fmt.Errorf(
+				"addon %q requires a Red Hat pull secret.\n"+
+					"  Get one from: %s\n"+
+					"  Then run:     oinc pull-secret set <path>",
+				a.Name(), pullsecret.PullSecretURL,
+			)
+		}
 	}
 
 	return sorted, nil

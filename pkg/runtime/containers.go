@@ -139,6 +139,11 @@ func (r *Runtime) CopyFromContainer(container, path string) ([]byte, error) {
 	return r.ExecInContainer(container, "cat", path)
 }
 
+func (r *Runtime) CopyToContainer(container, srcPath, dstPath string) error {
+	_, err := r.run("cp", srcPath, container+":"+dstPath)
+	return err
+}
+
 type ContainerInfo struct {
 	Running   bool
 	Image     string
